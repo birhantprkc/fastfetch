@@ -3,7 +3,9 @@
 #include "common/android/api.h"
 #include "common/android/binder.h"
 #include "common/android/dex.h"
+#include "common/android/package.h"
 #include "common/debug.h"
+#include "common/strutil.h"
 
 #include <ifaddrs.h>
 #include <net/if.h>
@@ -153,11 +155,6 @@ typedef enum FFWifiAndroidRadioState : int32_t
     FF_WIFI_ANDROID_WIFI_STATE_UNKNOWN = 4,
 } FFWifiAndroidRadioState;
 
-// The other argument is the caller's package name. The shell UID owns exactly one package and the
-// service accepts that name, which is what `cmd` and `dumpsys` pass. The UID itself is
-// FF_ANDROID_PRIVILEGED_UID_SHELL, see common/android/api.h. See getOwnPackage().
-#define FF_WIFI_ANDROID_SHELL_PACKAGE "com.android.shell"
-
 // An AIDL reply opens with the exception code and, for a Parcelable return, a non-null marker;
 // WifiInfo itself then starts at 8. The network id, the RSSI and the link speed have held those
 // offsets from Android 9 to 16, and the transmit speed joined them in Android 10 without moving
@@ -290,64 +287,9 @@ typedef enum FFWifiAndroidStandard : int32_t
 // Binder
 // ---------------------------------------------------------------------------------------------
 
-// `getConnectionInfo` takes the caller's package name, and whether it is checked depends on the
-// release: the Android 16 device answered "Package com.termux does not belong to <shell uid>" for a name
-// the shell does not own, while the Android 11 device accepted the same name. Passing the real one is
-// what works on both. There is no way for a process to ask for its own package name -- it is not in
-// /proc/self/status, and an app cannot list /data/data -- but the executable path carries it: an app's
-// binaries live under /data/data/<package>/ or /data/user/<user>/<package>/, and /proc/self/exe
-// resolves there.
-//
-// A binary outside those directories has no package of its own, and that is not an edge case: a
-// static build pushed to /data/local/tmp is how this runs on a device without Termux, and the Android
-// 11 device reported "Cannot determine the package name of this process" for exactly that. The shell UID can
-// be answered instead, because it has one name the service accepts. No other UID reaches here: an
-// app's own binaries are always under its data directory, so a failure there is a real failure.
-static bool getOwnPackage(char* buffer, size_t capacity) {
-    char path[4096];
-    const ssize_t length = readlink("/proc/self/exe", path, sizeof(path) - 1);
-    if (length <= 0) {
-        FF_DEBUG("Cannot read /proc/self/exe, so the calling package cannot be derived");
-        return false;
-    }
-    path[length] = '\0';
-
-    const char* rest = nullptr;
-    const char* const dataPrefix = "/data/data/";
-    const char* const userPrefix = "/data/user/";
-    if (strncmp(path, dataPrefix, strlen(dataPrefix)) == 0) {
-        rest = path + strlen(dataPrefix);
-    } else if (strncmp(path, userPrefix, strlen(userPrefix)) == 0) {
-        rest = strchr(path + strlen(userPrefix), '/');
-        if (rest != nullptr) {
-            rest += 1;
-        }
-    }
-    if (rest == nullptr) {
-        const uint32_t uid = instance.state.platform.uid;
-        FF_DEBUG("The executable is not in an app data directory (\"%s\"), uid %u", path, uid);
-        if (uid != FF_ANDROID_PRIVILEGED_UID_SHELL) {
-            return false;
-        }
-        static const char shellPackage[] = FF_WIFI_ANDROID_SHELL_PACKAGE;
-        if (sizeof(shellPackage) > capacity) {
-            return false;
-        }
-        memcpy(buffer, shellPackage, sizeof(shellPackage));
-        FF_DEBUG("The calling package is \"%s\" (the shell owns it)", buffer);
-        return true;
-    }
-
-    const char* end = strchr(rest, '/');
-    const size_t nameLength = end != nullptr ? (size_t) (end - rest) : strlen(rest);
-    if (nameLength == 0 || nameLength >= capacity) {
-        return false;
-    }
-    memcpy(buffer, rest, nameLength);
-    buffer[nameLength] = '\0';
-    FF_DEBUG("The calling package is \"%s\"", buffer);
-    return true;
-}
+// The caller's own package name, which `getConnectionInfo` takes as its second argument: see
+// ffAndroidGetOwnPackage() in common/android/package.h for why it has to be that one and how it is
+// derived. `getWallpaper` in the Wallpaper module asks for the same thing.
 
 static bool isMacAddress(const char* value, uint32_t length) {
     if (length != FF_WIFI_ANDROID_MAC_STRING_LENGTH) {
@@ -418,7 +360,7 @@ static void detectInterface(FFWifiAndroidConnection* connection) {
     }
 
     for (const struct ifaddrs* ifa = addrs; ifa != nullptr; ifa = ifa->ifa_next) {
-        if (ifa->ifa_name == nullptr || strncmp(ifa->ifa_name, "wlan", 4) != 0) {
+        if (ifa->ifa_name == nullptr || !ffStrStartsWith(ifa->ifa_name, "wlan")) {
             continue;
         }
         snprintf(connection->interface, sizeof(connection->interface), "%s", ifa->ifa_name);
@@ -493,7 +435,7 @@ static void findStrings(const uint8_t* data, size_t size, size_t from, FFWifiAnd
             connection->bssidSeen = true;
             // The placeholder means there is no address to report: it is what the service writes
             // both for a caller it may not tell and for a connection that has none.
-            if (strcmp(buffer, FF_WIFI_ANDROID_DEFAULT_MAC_ADDRESS) != 0) {
+            if (!ffStrEquals(buffer, FF_WIFI_ANDROID_DEFAULT_MAC_ADDRESS)) {
                 memcpy(connection->bssid, buffer, length + 1);
             }
         } else if (connection->state[0] == '\0' && isSupplicantState(buffer, length)) {
@@ -804,7 +746,7 @@ static const char* parseConnectionInfo(const uint8_t* data, size_t size, FFWifiA
         // connection has no frequency to write, so one that is here and passed the checks above is a
         // connection.
         if (connection->state[0] != '\0') {
-            connection->connected = strcmp(connection->state, "COMPLETED") == 0;
+            connection->connected = ffStrEquals(connection->state, "COMPLETED");
         } else {
             connection->connected = connection->ssidAbsent
                 || ffBinderReadI32(data, size, FF_WIFI_ANDROID_OFF_NET_ID) >= 0;
@@ -876,7 +818,7 @@ static const char* callIntMethod(FFBinder* binder, uint32_t handle, const char* 
 
     uint8_t replyBuffer[64];
     FFBinderReply reply = ffBinderReplyCreate(replyBuffer, sizeof(replyBuffer));
-    error = ffBinderTransact(binder, handle, (uint32_t) transaction, &parcel, &reply);
+    error = ffBinderTransact(binder, handle, (uint32_t) transaction, 0, &parcel, &reply);
     if (error != nullptr) {
         return error;
     }
@@ -894,9 +836,22 @@ static const char* callIntMethod(FFBinder* binder, uint32_t handle, const char* 
     return nullptr;
 }
 
+// `ffAndroidGetOwnPackage` writes at most this many bytes, terminator included.
+#define FF_WIFI_ANDROID_PACKAGE_SIZE 128
+
+// The parcel for `getConnectionInfo` is the interface token, the package name and the -1 that
+// stands for a null `callingFeatureId`. A string16 costs 4 + 2 * (length + 1) bytes padded to four,
+// and the token puts three int32 in front of the descriptor. Deriving the size from the two names
+// rather than rounding it up is what keeps the longest package name `ffAndroidGetOwnPackage` can
+// produce from marking the parcel truncated -- that fails the whole detection, rather than degrading
+// to a call without a name.
+#define FF_WIFI_ANDROID_PARCEL_SIZE \
+    (12 + ((4 + 2 * sizeof(FF_WIFI_ANDROID_DESCRIPTOR) + 3) & ~3u) \
+        + ((4 + 2 * FF_WIFI_ANDROID_PACKAGE_SIZE + 3) & ~3u) + 4)
+
 static const char* detectWithBinder(FFlist* result) {
-    char package[128];
-    if (!getOwnPackage(package, sizeof(package))) {
+    char package[FF_WIFI_ANDROID_PACKAGE_SIZE];
+    if (!ffAndroidGetOwnPackage(package, sizeof(package))) {
         return "Cannot determine the package name of this process";
     }
 
@@ -913,15 +868,17 @@ static const char* detectWithBinder(FFlist* result) {
         return error;
     }
 
-    uint32_t handle = 0;
-    error = ffBinderLookupService(&binder, FF_WIFI_ANDROID_SERVICE, FF_BINDER_SM_GET_SERVICE, &handle);
+    // Released on every path out of this function, including the ones below that return early: the
+    // references the lookup takes are the process's only claim on the service node.
+    [[gnu::cleanup(ffBinderServiceHandleRelease)]] FFBinderServiceHandle service = { .binder = &binder };
+    error = ffBinderLookupService(&binder, FF_WIFI_ANDROID_SERVICE, FF_BINDER_SM_GET_SERVICE, &service.handle);
     if (error != nullptr) {
         return error;
     }
     FF_DEBUG("The \"%s\" service is handle %u, %s is transaction %d",
-        FF_WIFI_ANDROID_SERVICE, handle, FF_WIFI_ANDROID_GET_CONNECTION_INFO, transaction);
+        FF_WIFI_ANDROID_SERVICE, service.handle, FF_WIFI_ANDROID_GET_CONNECTION_INFO, transaction);
 
-    uint8_t parcelBuffer[256];
+    uint8_t parcelBuffer[FF_WIFI_ANDROID_PARCEL_SIZE];
     FFBinderParcel parcel = ffBinderParcelCreate(parcelBuffer, sizeof(parcelBuffer));
     ffBinderParcelPutInterfaceToken(&parcel, FF_WIFI_ANDROID_DESCRIPTOR);
     ffBinderParcelPutString16(&parcel, package);
@@ -930,7 +887,7 @@ static const char* detectWithBinder(FFlist* result) {
 
     uint8_t replyBuffer[FF_WIFI_ANDROID_REPLY_SIZE];
     FFBinderReply reply = ffBinderReplyCreate(replyBuffer, sizeof(replyBuffer));
-    error = ffBinderTransact(&binder, handle, (uint32_t) transaction, &parcel, &reply);
+    error = ffBinderTransact(&binder, service.handle, (uint32_t) transaction, 0, &parcel, &reply);
     if (error != nullptr) {
         return error;
     }
@@ -957,7 +914,7 @@ static const char* detectWithBinder(FFlist* result) {
         // that is up. WIFI_STATE_DISABLING is a radio that is still up, so only the one value means
         // down, and WIFI_STATE_UNKNOWN is the service declining to say.
         int32_t state = 0;
-        const char* stateError = callIntMethod(&binder, handle, FF_WIFI_ANDROID_GET_WIFI_ENABLED_STATE, &state);
+        const char* stateError = callIntMethod(&binder, service.handle, FF_WIFI_ANDROID_GET_WIFI_ENABLED_STATE, &state);
         if (stateError == nullptr && state != FF_WIFI_ANDROID_WIFI_STATE_UNKNOWN) {
             connection.up = state != FF_WIFI_ANDROID_WIFI_STATE_DISABLED;
             connection.upKnown = true;
