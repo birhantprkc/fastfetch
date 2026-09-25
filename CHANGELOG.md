@@ -7,6 +7,9 @@ Changes:
 * Modules selected with `--structure` now honor their options from the JSON config.
 
 Features:
+* Added `logo.position: "auto"` and `--logo-position auto` to place wide logos above module output when the terminal has less than 32 columns available for text. (Logo)
+    * The position can also be selected in interactive `--gen-config`. 
+    * For now, the default position is `left` for compatibility with previous releases. This may change to `auto` in future releases.
 * Improved Bluetooth detection support:
     * Added Bluetooth Low Energy detection on Windows and macOS.
     * Report device type (LE or classic) and signal quality, if available.
@@ -16,7 +19,7 @@ Features:
         * For package managers: ImageMagick dependencies can be removed on macOS, Windows and Android as they are no longer used for image logos.
         * Windows Terminal supports sixel logos out of the box
     * Changes to a source image now correctly invalidate its cache. (Logo)
-    * Added GIF and APNG support to `--kitty` image protocol. Set `logo.animationFrame` to `0` to play animations in compatible kitty terminals; positive or negative values select a still frame. Android animation requires Android 12 (API 31); unsupported terminals show the first frame. (Logo)
+    * Added GIF and APNG support to `--kitty` image protocol. Set `logo.animationFrame` to `0` to play animations in compatible kitty terminals; positive or negative values select a still frame. Android animation requires Android 12 (API 31); terminals without kitty graphics protocol support report an error and fall back to the built-in logo instead. (Logo)
     * Added cmake option `-DENABLE_IMAGE_LOGO=<BOOL>` (default `ON`) to disable image logos and reduce binary size. `raw` logos remain available. (Logo)
 * Improved Linux support:
     * Added RakuOS rum overlay package counting (`{rum}`) and CRUX package detection (`{crux}`). (Packages)
@@ -27,7 +30,7 @@ Features:
     * Improved camera detection; Android 7 (API 24) or later is required. (Camera)
     * Battery level and charging state are now available to apps; detailed battery information requires root or ADB. (Battery)
     * Added display mode, physical size, rotation, and HDR information. App-based detection requires Android 13 (API 33); root or ADB can also detect displays on older versions. (Display)
-    * Added Wi-Fi interface, connection, standard, and security information. Android 11 (API 30) or later is required. Termux:API and location permission are needed to reveal SSID and BSSID; otherwise, they appear as `<redacted>`. (Wifi)
+    * Added Wi-Fi interface, connection, standard, and security information. Android 11 (API 30) or later is required. Termux:API is needed for the Wi-Fi permission, and location permission is needed to reveal SSID and BSSID; without location permission the two names appear as `<redacted>`. (Wifi)
     * Added Wallpaper detection, which effectively reports `/data/system/users/0/wallpaper`. (Wallpaper)
     * Added Media detection, root/ADB only. (Media / Player)
 * Improved macOS support:
@@ -46,6 +49,7 @@ Features:
     * Lua format scripting is now considered stable.
 
 Bugfixes:
+* Fixed Snapdragon X2 series model detection on Linux. (#2611, CPU / Linux)
 * Fixed image logo caching, padding, and positioning issues, including an iTerm display bug. (Logo)
 * Fixed several Windows issues, including Windows Terminal font detection, redirected `--gen-config` output, and gamepad battery reporting for DualShock 4 and Switch controllers. (#2573, TerminalFont; Gamepad; General)
 * Fixed formatting and display issues, including ANSI-aware truncation, date/time formatting, and bright key/title colors. (Format / DateTime / Display)
