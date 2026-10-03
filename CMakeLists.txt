@@ -283,8 +283,10 @@ endif()
 # Release and MinSizeRel drop the symbol table and the unwind metadata; Debug and RelWithDebInfo keep
 # both, so those stay fully debuggable. CMake does not strip MinSizeRel on its own.
 if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "MinSizeRel")
-    # The symbol table is dead weight: 437 KB (16%) of a MinGW build, 91 KB (3%) of a GCC build.
-    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,-s")
+    if(NOT APPLE) # ld: warning: -s is obsolete
+        # The symbol table is dead weight: 437 KB (16%) of a MinGW build, 91 KB (3%) of a GCC build.
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,-s")
+    endif()
 
     # Drops .eh_frame / .eh_frame_hdr on ELF (74 KB) and .pdata / .xdata on PE (26 KB). Every C++
     # translation unit here is built with -fno-exceptions -fno-rtti and no source file contains a
@@ -292,18 +294,6 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "MinSizeRel"
     # backtrace() / gdb / perf / crash-dump stack walking in a release binary.
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-asynchronous-unwind-tables")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-asynchronous-unwind-tables")
-
-    if(NOT WIN32 AND NOT APPLE AND NOT ANDROID)
-        # Drops .rela.dyn (250 KB) and .data.rel.ro (169 KB) on ELF and removes every load-time
-        # relocation, so startup gets faster too. The cost is ASLR, and a distro that builds with
-        # hardening=+all / %_hardened_build passes -fPIE -pie and overrides this anyway.
-        # Skipped on Windows (PE has no PIE, clang warns "-no-pie unused"), on macOS (Mach-O has no
-        # .rela.dyn, and turning PIE off fights the code-signing defaults) and on Android, which
-        # rejects non-PIE executables outright.
-        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-pie")
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-pie")
-        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -no-pie")
-    endif()
 endif()
 
 #######################
@@ -486,6 +476,7 @@ file(GENERATE OUTPUT logo_builtin.h CONTENT "${LOGO_BUILTIN_H}")
 
 set(LIBFASTFETCH_SRC
     src/common/impl/commandoption.c
+    src/common/impl/debug.c
     src/common/impl/duration.c
     src/common/impl/font.c
     src/common/impl/format.c
@@ -1118,7 +1109,6 @@ elseif(WIN32)
         src/common/impl/processing_windows.c
         src/common/impl/FFPlatform_windows.c
         src/common/impl/binary_windows.c
-        src/common/impl/debug_windows.c
         src/common/impl/kmod_windows.c
         src/common/windows/getline.c
         src/common/windows/com.c
